@@ -1,0 +1,6 @@
+"0","rel_person %>% select(stay_awake, epslpscl5c, sleepy5) %>% "
+"0","    pivot_longer(!stay_awake, names_to = ""type"", values_to = ""sleepy"") %>% "
+"0","    ggplot() +"
+"0","    geom_point(aes(x = stay_awake, y = sleepy)) +"
+"0","    facet_wrap(vars(type), scales = ""free"") +"
+"0","    ggtitle(""Relationship between probability of staying awake \nand sleepiness scores"")"

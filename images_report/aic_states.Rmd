@@ -1,0 +1,182 @@
+---
+title: "State Number with Best AIC"
+author: "Janique"
+date: "09/08/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE, 
+                      message = FALSE)
+knitr::opts_knit$set(root.dir = '/home/janique/mesa/actigraphy')
+```
+## Packages
+
+```{r}
+library(methods)
+library(moveHMM)
+library(tidyverse)
+library(lubridate)
+set.seed(1729)
+```
+
+## Functions
+
+```{r}
+# Function for importing actigraphy
+read_func <- function(nm) {
+    dt <- read_csv(paste0("/home/janique/mesa/actigraphy/", nm),
+             col_types = cols_only(
+                 mesaid = col_integer(),
+                 linetime = col_character(),
+                 offwrist = col_integer(),
+                 activity = col_double(),
+                 daybymidnight = col_integer()
+             )) %>% 
+        rename(tm_char = linetime, ID = mesaid) %>% 
+        filter(offwrist == 0 & !is.na(activity) & daybymidnight < 8) %>% 
+        mutate(
+            linetime = parse_time(tm_char),
+            date_var = ymd("1960-01-01") + days(daybymidnight),
+            dt = ymd_hms(paste(date_var, linetime)),
+            # Round time to 5 minute intervals
+            dt5 = floor_date(dt, unit = "5 minutes"),
+            .keep = "unused"
+        ) %>% select(ID, activity, dt5) %>% 
+        group_by(ID, dt5) %>% 
+        # Summarise activity in 5-minute intervals
+        summarise(act5_mean = mean(activity),
+                  dummy = 0, .groups = "drop")
+    
+    return(dt)
+}
+
+
+# Function for adding the HMM model
+plot_step <- function(dt) {
+    
+    # Calculate preparatory dataframe
+    df_prep <- dt %>%
+    select(all_of(c("act5_mean", "dummy", "ID"))) %>% 
+    as.data.frame() %>% 
+    prepData(type = "UTM", coordNames = c("act5_mean", "dummy"))
+
+    quant <- quantile(df_prep$step, na.rm = TRUE, names = FALSE)
+    varian <- var(df_prep$step, na.rm = TRUE)
+    std <- sqrt(varian)
+    # Iterations with different starting values
+    nb_iter <- 10
+
+    # Iterate for between 2 and 4 states
+    for (i in 2:4) {
+        print(paste("Processing", i, "states for participant", unique(dt$mesaid)))
+        # Only first state can have zero observations
+        zeromass0 <- c(0.5, rep(0, i - 1))
+        
+        # Minimum for optimisation
+        minim <- Inf
+        
+        # Number of random starts
+        for (j in 1:nb_iter) {
+            mu0 <- sort(runif(i, quant[2], quant[4]))
+            sigma0 <- sort(runif(i, std, varian))
+            stepPar0 <- c(mu0, sigma0, zeromass0)    
+            mod <- try(fitHMM(data = df_prep, nbStates = i, 
+                              stepPar0 = stepPar0, angleDist = "none", 
+                              stepDist = "gamma"), silent = TRUE)         
+            if (class(mod)[1] == "try-error") {
+                 print(paste("Model did not converge for", i, "states"))
+            } else if (class(mod)[1] != "try-error") {
+                new_minim <- mod$mod$minimum
+                enough_states <- try(table(viterbi(mod)), silent = TRUE)
+                if (class(enough_states) != "try-error"){
+                    if (length(enough_states) != i){
+                        print(paste("Model converged to fewer states than", i))
+                    } else if (new_minim < minim) {
+                        assign(paste("m", i, sep = ""), mod)
+                        minim <- new_minim
+                    }
+                }
+          }
+        }
+        if (is.infinite(minim)) {
+            assign(paste("m", i, sep = ""), NULL)
+            print(paste("Did not find a HMM for", i, "states"))
+        }
+    }
+    
+    return(list("m2" = m2, "m3" = m3, "m4" = m4))
+    
+}
+
+# Function for choosing model with best AIC
+choose_model <- function(models) {
+    # Extract from list because of naming issues
+    m2 <- models$m2
+    m3 <- models$m3
+    m4 <- models$m4
+    # If model for 3 states did not converge
+    if (is.null(m3) && !is.null(m4)) {
+        aic <- AIC(m2, m4)
+    } else {
+    aic <- AIC(m2, m3, m4)
+    }
+
+    # Pick best model by best AIC
+    low_aic <- aic %>% arrange(AIC, Model) %>% select(Model) %>% 
+        slice(1) %>% as.character()
+    final_mod <- eval(as.name(low_aic))
+    return(final_mod)
+}
+```
+
+## Sample participants for fitting
+
+```{r}
+files1 <- list.files("/home/janique/mesa/actigraphy")
+indices <- str_extract(files1, "[\\d]+") %>% as.numeric()
+
+# Import dataset for PSG overlap
+overlap <- read_csv("/home/janique/mesa/overlap/mesa-actigraphy-psg-overlap.csv",
+                    col_types = cols_only(
+                        mesaid = col_integer(),
+                        line = col_integer()
+                    )) 
+
+# Select only people with PSG overlap
+files <- files1[indices %in% overlap$mesaid]
+# save(files, file = "/home/janique/mesa/R/subjects_psg.RData")
+
+files50 <- sample(files, 50)
+```
+
+## Obtain number of states
+
+
+```{r out.width="100%", echo = FALSE}
+# Combine all functions into one
+states_func <- function(file_name){
+    df <- read_func(file_name)
+    mods <- plot_step(df)
+    m <- choose_model(mods)
+    number_states <- length(m$mle$delta)
+    return(number_states)
+}
+
+# Empty vector for results
+vector_states <- rep(NA, length(files50))
+
+for (i in 1:length(files50)){
+    print(paste(files50[i], "is being processed"))
+    vector_states[i] <- states_func(files50[i])
+}
+
+table(vector_states)
+
+# save(vector_states, file = "/home/janique/mesa/R/vector_states_10iter.RData")
+```
+
+
+
+
+

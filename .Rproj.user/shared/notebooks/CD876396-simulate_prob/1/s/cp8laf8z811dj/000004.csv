@@ -1,0 +1,20 @@
+"0","# Join all summary tables
+full_sum <- bind_rows(df_sum1, df_sum2, df_sum6, df_sum10, df_sum14,
+                      df_sum16, df_sum21, df_sum27, df_sum28, 
+                      df_sum33, df_sum35, 
+                      df_sum38, df_sum46, 
+                      df_sum48, df_sum50, df_sum52, df_sum64, df_sum70,
+                      df_sum74, df_sum77, df_sum81, df_sum84,
+                      df_sum99, df_sum107,
+                      df_sum110, df_sum118, df_sum120, 
+                      df_sum121, df_sum193, df_sum144,
+                      df_sum219, df_sum225, 
+                      df_sum248, df_sum251, df_sum332,
+                      df_sum339, df_sum345, df_sum374, df_sum518, df_sum519,
+                      df_sum561, df_sum589, df_sum789, 
+                      df_sum989, df_sum1148, df_sum1290, df_sum1744,
+                      df_sum1759, df_sum2221, df_sum3971,
+                      df_sum4763, df_sum6003)
+"
+"2","Error in list2(...) : object 'df_sum248' not found
+"

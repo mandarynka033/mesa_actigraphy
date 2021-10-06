@@ -1,0 +1,4 @@
+"0","rel_person %>% ggplot(aes(x = sleepage5c, y = state_mean3)) + geom_point() +"
+"0","    labs(title = ""Older people are less active"","
+"0","         subtitle = ""Mean of most active state lower for older people"") +"
+"0","    geom_smooth(method = ""lm"", se = FALSE)"

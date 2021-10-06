@@ -1,0 +1,7 @@
+"0","    "
+"0","    # Combine HMM classifications with the actigraphy dataset ones"
+"0","    with_mode <- df_old %>% group_by(dt5) %>% select(dt5, interval) %>% "
+"0","        summarise(mode3 = getmode(interval), .groups = ""drop"") %>% "
+"0","        cbind(df_ord)    "
+"2","Error in eval(lhs, parent, parent) : object 'df_old' not found
+"

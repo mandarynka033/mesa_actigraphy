@@ -1,0 +1,7 @@
+"0","print(paste(""Mean accuracy for my HMM vs PSG:"",
+            round(mean(rel_person$accuracy_psg, na.rm = TRUE), digits = 2)))
+"
+"1","[1]"
+"1"," ""Mean accuracy for my HMM vs PSG: 0.78"""
+"1","
+"

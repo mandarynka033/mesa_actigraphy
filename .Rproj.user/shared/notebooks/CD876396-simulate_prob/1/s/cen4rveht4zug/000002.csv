@@ -1,0 +1,5 @@
+"0","rel_person %>% ggplot() +"
+"0","    geom_point(aes(x = wakeup5, y = stay_sleep, col = sleepage5c)) +"
+"0","    scale_color_gradient(low = ""blue"", high = ""red"") +"
+"0","    ggtitle(""Probability of staying in the rest state is lower for declared "
+"0","            \nhigh frequency of waking up"")"

@@ -1,0 +1,7 @@
+"0",""
+"0","rel_person %>% arrange(stay_awake) %>% mutate(index_prob = row_number()) %>% "
+"0","    arrange(sleepy5) %>% mutate(index_sleepy = row_number()) %>% "
+"0","    ggplot(aes(x = index_prob, y = index_sleepy)) + "
+"0","    geom_point(aes(col = as.factor(gender1))) +"
+"0","    geom_smooth(method = ""lm"", se = FALSE) +"
+"0","    labs(col = ""Gender"")"

@@ -1,0 +1,9 @@
+"0","for (i in 1:nb_iter){
+    probs_state <- trans_matrix[states_vec[i],]
+    new_state <- which(rmultinom(1, 1, probs_state))
+    states_vec[i + 1] <- new_state
+}
+"
+"2","Error in which(rmultinom(1, 1, probs_state)) : 
+  argument to 'which' is not logical
+"

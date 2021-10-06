@@ -1,0 +1,5 @@
+"0","centre <- prob_sleep(m, df, df_order)
+"
+"2","Error in data.frame(..., check.names = FALSE) : 
+  arguments imply differing number of rows: 1788, 17860
+"

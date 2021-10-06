@@ -1,0 +1,9 @@
+"0","if (!is.null(m)) {
+    df_sum1 <- summary_func(m, df, df2, ""act5_mean_sqrt"")
+}
+"
+"1","[1]"
+"1"," ""Active states' numbers: 2"""
+"1"," ""Active states' numbers: 3"""
+"1","
+"

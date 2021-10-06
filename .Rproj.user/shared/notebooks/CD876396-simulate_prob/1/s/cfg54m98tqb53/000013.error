@@ -1,0 +1,1 @@
+{"frames":[{"func":"which(rmultinom(1, 1, probs_state))","file":"","line_number":0,"end_line_number":0,"character_number":0,"end_character_number":0}],"message":"Error in which(rmultinom(1, 1, probs_state)) : \n  argument to 'which' is not logical\n"}

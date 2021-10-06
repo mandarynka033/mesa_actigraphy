@@ -1,0 +1,10 @@
+"0","ggplot(rel_person, aes(x = mean_active, y = ri)) +
+    geom_point(aes(col = sleepage5c)) +
+    geom_smooth(method = ""lm"", se = FALSE) +
+    labs(title = ""Higher active actigraphy values correspond to stable sleep"",
+         x = ""Mean actigraphy for active state"",
+         y = ""Rhythm index"", col = ""Age"") +
+    scale_color_gradient(low = ""blue"", high = ""red"")
+"
+"2","`geom_smooth()` using formula 'y ~ x'
+"

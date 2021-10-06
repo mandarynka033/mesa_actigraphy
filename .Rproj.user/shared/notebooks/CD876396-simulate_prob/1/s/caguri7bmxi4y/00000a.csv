@@ -1,0 +1,22 @@
+"0","    if (length(halfs) == 0 || all(diff(halfs) == 1)){
+        centre <- NA
+        ri2 <- NA
+    } else {
+        centre <- hm(format(df_prob$dt5[index_centre], format = ""%H:%M""))
+        # Rhythm index
+    limit1 <- df_prob$dt5[index_centre] - hours(round(sleep_amount/2)) -
+        minutes(floor(sleep_amount %% 1 * 60))
+    limit2 <- df_prob$dt5[index_centre] + hours(round(sleep_amount/2)) +
+        minutes(floor(sleep_amount %% 1 * 60))
+    limit_low <- floor_date(limit1, unit = ""5 minutes"")
+    limit_high <- floor_date(limit2, unit = ""5 minutes"")
+    index_low <- which(df_prob$dt5 == limit_low)
+    index_high <- which(df_prob$dt5 == limit_high)
+    ri_vctr <- df_prob$mean_prob[index_low:index_high]
+    diff_ri <- rep(diff(df_prob$tm)[1], length(ri_vctr) - 1)
+    ri1 <- sum(diff_ri * (head(ri_vctr,-1) + tail(ri_vctr,-1)))/2
+    ri2 <- 24*(ri1/sleep_amount - sleep_amount/24)/(24 - sleep_amount)
+    }
+"
+"2","Error in index_low:index_high : argument of length 0
+"

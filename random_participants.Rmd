@@ -1,0 +1,746 @@
+---
+title: "Final Summary"
+author: "Janique"
+date: "09/08/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE, 
+                      message = FALSE)
+knitr::opts_knit$set(root.dir = '/home/janique/mesa/actigraphy')
+```
+
+## Packages
+
+```{r}
+library(methods)
+library(XML)
+library(quantreg)
+library(corrplot)
+library(scales)
+library(ggpubr)
+library(mgcv)
+library(lubridate)
+library(moveHMM)
+library(tidyverse)
+set.seed(1337)
+```
+
+## Functions
+
+```{r}
+# Dataset for overlap between PSG and actigraphy
+overlap <- read_csv(
+    "/home/janique/mesa/overlap/mesa-actigraphy-psg-overlap.csv",
+                    col_types = cols_only(
+                        mesaid = col_integer(),
+                        line = col_integer()
+                    )) 
+
+# Obtain mode
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# Wrapper for extracting means and variances
+round_func <- function(x) {round(as.numeric(x), digits = 1)}
+
+# Function for importing actigraphy
+fit_model <- function(nm) {
+    dt <- read_csv(paste0("/home/janique/mesa/actigraphy/", nm),
+             col_types = cols_only(
+                 mesaid = col_integer(),
+                 linetime = col_character(),
+                 offwrist = col_integer(),
+                 activity = col_double(),
+                 marker = col_integer(),
+                 whitelight = col_double(),
+                 wake = col_factor(),
+                 interval = col_factor(),
+                 daybymidnight = col_integer(),
+                 daybynoon = col_integer()
+             )) %>% 
+        rename(tm_char = linetime) %>% 
+        mutate(linetime = parse_time(tm_char), .keep = "unused")
+    
+    id <- unique(dt$mesaid)
+    # Extracting the starting point for PSG from the overlap dataset
+    start_index <- overlap %>% filter(mesaid == id) %>%
+        select(line) %>% as.numeric()
+    
+    lead_zero <- str_extract(nm, "\\d+")
+    # File with PSG values
+    xml_file <- paste("/home/janique/mesa/polysomnography/annotations-events-profusion/mesa-sleep-", lead_zero, "-profusion.xml", sep = "")
+    
+    # Formatting the XML file to get sleep stage values
+    xml1 <- xmlParse(file = xml_file) 
+    r <- xmlRoot(xml1)
+    
+    sleep_stages <- r["SleepStages"] %>% unlist(use.names = FALSE) %>% 
+    xmlValue(trim = TRUE) %>% 
+    str_split(pattern = "")
+    
+    len_stages <- length(sleep_stages[[1]])
+    
+    # Creating a vector with the available PSG values
+    df_psg <- tibble(
+        psg_stage = c(rep(NaN, start_index), as.numeric(sleep_stages[[1]]),
+                      rep(NaN, 
+                          nrow(dt) - start_index - len_stages))
+    )    
+    
+    # Combining the original dataframe with the PSG classification vector
+    df <- dt %>% cbind(df_psg) %>% 
+        filter(offwrist == 0 & !is.na(activity) & daybymidnight < 8) %>% 
+        mutate(
+            hr = hour(linetime),
+            date_var = ymd("1960-01-01") + days(daybymidnight),
+            dt = ymd_hms(paste(date_var, linetime)),
+            # Rounding time to 5-minute intervals
+            dt5 = floor_date(dt, unit = "5 minutes"),
+            mins5 = hms(format(dt5, format = "%H:%M:%S")),
+            # 0 for awake; 1, 2, 3, 5 for sleep in PSG
+            psg01 = if_else(is.na(psg_stage), NaN,
+                            if_else(psg_stage == 0, 0, 1))
+        ) %>% 
+        rename(ID = mesaid)
+
+    df2 <- df %>% select(ID, activity, dt5, psg01) %>% 
+        group_by(ID, dt5) %>% 
+        summarise(
+            # Averaging 5-minute actigraphy
+            act5_mean = mean(activity),
+            act5_mean_sqrt = sqrt(act5_mean),
+            psg_mean = mean(psg01),
+            sleep_psg = if_else(psg_mean > 0.5, "REST", "ACTIVE"),
+            dummy = 0, .groups = "drop")
+    
+    # Median for separating rest and active states
+    sleep_limit <- median(df2$act5_mean)
+
+    # Calculate preparatory dataframe
+    df_prep <- df2 %>%
+        select(all_of(c("act5_mean", "dummy", "ID"))) %>% 
+        as.data.frame() %>% 
+        prepData(type = "UTM", coordNames = c("act5_mean", "dummy"))
+
+    # Summary statistics for starting values
+    quant <- quantile(df_prep$step, na.rm = TRUE, names = FALSE)
+    varian <- var(df_prep$step, na.rm = TRUE)
+    std <- sqrt(varian)
+    
+    # Number of iterations with different starting values
+    nb_iter <- 20
+
+    # Only first state can have zero observations
+    zeromass0 <- c(0.5, 0, 0)
+    
+    # Minimum for optimisation
+    minim <- Inf
+    
+    # Number of random starts
+    for (j in 1:nb_iter) {
+        mu0 <- sort(runif(3, quant[2], quant[4]))
+        sigma0 <- sort(runif(3, sqrt(std), varian))
+        stepPar0 <- c(mu0, sigma0, zeromass0)      
+        mod <- try(fitHMM(data = df_prep, nbStates = 3, stepPar0 = stepPar0,
+                          angleDist = "none", stepDist = "gamma"), 
+                   silent = TRUE)  
+        if (class(mod)[1] != "try-error") {
+            new_minim <- mod$mod$minimum
+            enough_states <- try(table(viterbi(mod)), silent = TRUE)
+            if (class(enough_states) != "try-error"){
+                if (new_minim < minim && length(enough_states) == 3) {
+                    m3 <- mod
+                    minim <- new_minim
+                }                
+            }
+        }
+    }
+    if (is.infinite(minim)) {
+        m3 <- NULL
+        print("Did not find a HMM for 3 states")
+    }
+    
+    # If model converged
+    if (!is.null(m3)){
+    
+        # State characteristics
+        gamma_stats <- m3$mle$stepPar %>% round(digits = 2)
+        # Probability of going between states
+        prob_matrix <- m3$mle$gamma %>% round(digits = 3)
+        
+        # Obtain states
+        states <- viterbi(m3)
+        # Join states with main dataframe
+        df_states <- cbind(df2, states)
+        
+        # Order states by average activity
+        df_order <- df_states %>% group_by(states) %>% 
+            summarise(mean_state = mean(.data[["act5_mean"]]), 
+                      .groups = "drop") %>% 
+            arrange(mean_state) %>% 
+            mutate(state_order = row_number())
+    
+        # Add ordered states to dataframe
+        df_ord <- df_order %>% select(states, state_order) %>% 
+            right_join(df_states, by = "states") %>% 
+            select(-states) %>% arrange(dt5)
+        
+        # Labels for graph
+        day_labels <- c("1960-01-02" = "Day 1",
+                        "1960-01-03" = "Day 2",
+                        "1960-01-04" = "Day 3",
+                        "1960-01-05" = "Day 4",
+                        "1960-01-06" = "Day 5",
+                        "1960-01-07" = "Day 6",
+                        "1960-01-08" = "Day 7")
+        
+        # visualise states' classification
+        print(ggplot(df_ord, aes_string(x = "dt5", y = "act5_mean")) + 
+                  geom_point(aes(col = as.factor(state_order)), 
+                             size = 0.5, alpha = 0.7) +
+                  scale_x_datetime(date_breaks = "4 hours",
+                                   date_labels = "%H:%M") +
+                  facet_wrap(vars(date(dt5)), scales = "free_x", ncol = 4,
+                             labeller = as_labeller(day_labels)) +
+                  labs(col = "State", x = "Time", 
+                       y = "5-minute averaged actigraphy") +
+                  scale_color_manual(labels = c("1 - stable rest", 
+                                                "2 - disturbed rest", 
+                                                "3 - activity"),
+                       values = hue_pal()(3)) +
+                  theme(legend.position = c(1, 0), 
+                        legend.justification = c(1, 0),
+                        axis.text.x = element_text(size = 6)))
+    
+        # Obtaining probabilities for each state
+        probs_states <- stateProbs(m3)
+        
+        # Obtain raw rest states
+        rest_states_raw <- df_order %>% filter(mean_state < sleep_limit) %>% 
+            select(states) %>% unlist(use.names = FALSE)
+        
+        # Subset probabilities for rest states
+        df_probs <- tibble(
+            asleep = rowSums(probs_states[, rest_states_raw, drop = FALSE])
+            # Join with averaged dataset
+            ) %>% cbind(df2) %>% 
+            # Join with big dataset to add hour
+             left_join(select(df, dt5, hr), by = "dt5")  %>%
+            mutate(new_date = if_else(hr >= 12, "1960-01-01", "1960-01-02"))
+        
+        # Change date so that middle is at midday
+        date(df_probs$dt5) = ymd(df_probs$new_date)
+    
+        # Calculate mean probability for 5 minute intervals
+        df_prob <- df_probs %>% group_by(dt5) %>%
+              summarise(mean_prob = mean(asleep), .groups = "drop") %>% 
+            mutate(tm = as.numeric(hms(format(dt5, format = "%H:%M:%S")))/3600)
+        diff_vctr <- rep(diff(df_prob$tm)[1], 287)
+        sleep_amount <- sum(diff_vctr * (head(df_prob$mean_prob,-1) +
+                                             tail(df_prob$mean_prob,-1)))/2
+    
+        # Fit a gam model to estimate probability of over half of rest
+        gam_model <- gam(mean_prob ~ s(as.numeric(dt5), bs = "cs"), 
+                         data = df_prob)
+        y_pred <- predict(gam_model) %>% round(digits = 2)
+        halfs0 <- which(y_pred == 0.5)
+        
+        # If not enough, round more
+        if (length(halfs0) == 1 || all(diff(halfs0) == 1)) {
+            y_pred <- y_pred %>% round(digits = 1)
+        }
+        halfs <- which(y_pred == 0.5)
+
+        # Minimum and maximum of amplitude
+        max_y <- min(max(y_pred), 1)
+        min_y <- max(0, min(y_pred))
+        amp <- max_y - min_y
+    
+        # Check if sleep monotone, if not choose the latter of the periods
+        if (length(halfs) != 0){
+            if_mono <- y_pred[halfs[1]:halfs[length(halfs)]]
+            while (!all(if_mono >= 0.5)) {
+                halfs <- halfs[-1]
+                if_mono <- y_pred[halfs[1]:halfs[length(halfs)]]
+            }
+            start_end <- c(halfs[1], halfs[length(halfs)])  
+            # if the peak is during the day
+            if (y_pred[length(y_pred)] > 0.5 && y_pred[1] > 0.5) {
+                index_centre = start_end[2] + 
+                    (start_end[1] + 288 - start_end[2])/2
+            } else {
+                index_centre <- floor(sum(start_end) / 2)
+            }
+        }
+    
+        # If centre of rest not computable
+        if (length(halfs) == 0 || all(diff(halfs) == 1)) {
+            centre <- NA
+            ri2 <- NA
+            subtit <- "Not available"
+        } else {
+            centre <- as.numeric(hm(format(df_prob$dt5[index_centre], 
+                                           format = "%H:%M")))
+            # centre of sleep as a string
+            centre_string <- paste0(str_pad(floor(centre/3600), width = 2, 
+                                            pad = "0", side = "left"), ":",
+                                    (centre/3600) %% 1*60)
+            # Rhythm index
+        limit1 <- df_prob$dt5[index_centre] - hours(round(sleep_amount/2)) -
+            minutes(floor(sleep_amount %% 1 * 60))
+        limit2 <- df_prob$dt5[index_centre] + hours(round(sleep_amount/2)) +
+            minutes(floor(sleep_amount %% 1 * 60))
+        if (ymd_hms("1960-01-02 12:00:00") <= limit2) {
+            df_ext <- df_prob %>% filter(date(df_prob$dt5) == "1960-01-01")
+            date(df_ext$dt5) <- "1960-01-02"
+            df_prob <- rbind(df_prob, df_ext)
+        } 
+        limit_low <- floor_date(limit1, unit = "5 minutes")
+        limit_high <- floor_date(limit2, unit = "5 minutes")
+        index_low <- which(df_prob$dt5 == limit_low)
+        index_high <- which(df_prob$dt5 == limit_high)
+        ri_vctr <- df_prob$mean_prob[index_low:index_high]
+        diff_ri <- rep(diff(df_prob$tm)[1], length(ri_vctr) - 1)
+        ri1 <- sum(diff_ri * (head(ri_vctr,-1) + tail(ri_vctr,-1)))/2
+        ri2 <- 24*(ri1/sleep_amount - sleep_amount/24)/(24 - sleep_amount)
+        
+        # Creating the subtitle for the graph
+        subtit <- paste0("rest amount: ", round(sleep_amount, digits = 2),
+                          ";  centre of rest: ", centre_string,
+                          ";  rhythm index: ", round(ri2, digits = 2))
+        }  
+        
+         # Plot probability of rest
+        g <- df_prob %>% ggplot(aes(x = dt5, y = mean_prob)) +
+                  geom_line() +
+                  geom_smooth(method = "gam", se = FALSE,
+                              formula = y ~ s(x, bs = "cs")) +
+                  scale_x_datetime(date_labels = "%H:%M") +
+                  labs(x = "Time", y = "Mean probability of rest") +
+                  theme_classic() +
+            labs(subtitle = subtit, title = paste0("Participant ", id)) 
+
+        # Active states
+        active_states <- df_order %>% filter(mean_state > sleep_limit) %>% 
+            select(state_order) %>% unlist(use.names = FALSE)
+    
+        # Filter for observations with PSG available
+        df_psg <- df_ord %>% filter(!is.na(sleep_psg)) %>% 
+            mutate(my_class = if_else(state_order %in% active_states, 
+                                      "ACTIVE", "REST"), .keep = "unused")
+        
+        # Confusion matrix for PSG
+        psg_mtr <- table(df_psg$sleep_psg, df_psg$my_class)
+        # Confusion matrix for PSG
+        psg_mtr <- table(df_psg$sleep_psg, df_psg$my_class)
+        # Accuracy for PSG
+        true_pos <- psg_mtr[rownames(psg_mtr) == "REST", 
+                            colnames(psg_mtr) == "REST"]
+        true_neg <- psg_mtr[rownames(psg_mtr) == "ACTIVE",
+                            colnames(psg_mtr) == "ACTIVE"]
+        false_neg <- psg_mtr[rownames(psg_mtr) == "REST",
+                            colnames(psg_mtr) == "ACTIVE"]
+        false_pos <- psg_mtr[rownames(psg_mtr) == "ACTIVE",
+                            colnames(psg_mtr) == "REST"]
+        
+        # Accuracy
+        accur_psg <- round(sum(true_pos, true_neg, na.rm = TRUE) /
+                             sum(psg_mtr), digits = 2) 
+        
+        # Sensitivity
+        sens <- round(true_pos / sum(true_pos, false_neg, na.rm = TRUE), 
+                      digits = 2)
+        
+        # Sepcificity
+        spec <- round(true_neg / sum(true_neg, false_pos, na.rm = TRUE), 
+                      digits = 2)
+        
+        # If missing, set to NA
+        if (length(sens) == 0) {sens <- NA}
+        if (length(spec) == 0) {spec <- NA}
+
+        # Print PSG classifications side by side with HMM classifications
+        print(df_psg %>% 
+                  select(dt5, act5_mean_sqrt, sleep_psg, my_class) %>% 
+                  pivot_longer(cols = c(sleep_psg, my_class), 
+                               names_to = "type", values_to = "state") %>% 
+                  ggplot() + 
+                  geom_point(aes(x = dt5, y = act5_mean_sqrt, col = state)) +
+                  facet_wrap(vars(type)) +
+                  ggtitle(paste("HMM classification vs PSG classification for",
+                                id)))    
+        
+        # Combine HMM classifications with the actigraphy dataset ones
+        with_mode <- df %>% group_by(dt5) %>% select(dt5, interval) %>% 
+            summarise(mode3 = getmode(interval), .groups = "drop") %>% 
+            cbind(df_ord)    
+        # Combine rest-s with rest and output confusion matrix
+        conf_matrix <- table(with_mode$state_order, 
+                             with_mode$mode3) %>% 
+            as.data.frame() %>% 
+            filter(Var2 %in% c("ACTIVE", "REST", "REST-S")) %>% 
+            mutate(classification = if_else(Var2 == "ACTIVE", "ACTIVE",
+                                            "REST"),
+                   state = if_else(Var1 %in% active_states, "ACTIVE", "REST"),
+                   .keep = "unused") %>% 
+            group_by(state, classification) %>% 
+            summarise(freq = sum(Freq), .groups = "drop") %>% 
+            pivot_wider(names_from = classification, values_from = freq)
+    
+        # Accuracy of actigraphy classifications and HMM ones
+        accur <- ((filter(conf_matrix, state == "ACTIVE") %>% ungroup() %>% 
+                       select(ACTIVE) + 
+                       filter(conf_matrix, state == "REST") %>% ungroup() %>% 
+                       select(REST)) / nrow(df_ord)) %>% as.numeric() %>% 
+            round(digits = 2)
+    
+        # Create a matrix of states ordered by their average activity
+        ordered_matrix = matrix(0, nrow = 3, ncol = 3)
+        for (i in 1:3) {
+            for (j in 1:3) {
+                ordered_matrix[i, j] = prob_matrix[df_order$states[i], 
+                                                   df_order$states[j]]      
+            }
+        }
+        
+        # Extract restful ordered states
+        rest_states <- df_order %>% filter(mean_state < sleep_limit) %>% 
+            select(state_order) %>% unlist(use.names = FALSE)    
+    
+        # Matrix with restful states combined
+        iterations <- 10000
+        states_vec <- c(1, rep(NA, iterations - 1))
+        
+        # Simulation for state probabilities
+        for (i in 1:iterations) {
+            probs_state <- ordered_matrix[states_vec[i],]
+            new_state <- which(rmultinom(1, 1, probs_state) == 1)
+            states_vec[i + 1] <- new_state
+        }
+        
+        if (length(rest_states) == 1) {
+            simple_vector <- replace(states_vec, states_vec == 2, 3)
+        } else if (length(rest_states) == 2) {
+            simple_vector <- replace(states_vec, states_vec == 2, 1)
+        }
+        table_trans <- table(simple_vector[-length(simple_vector)],
+                             simple_vector[-1])
+        joined_trans_matrix <- table_trans / rowSums(table_trans)
+    
+        # Variance and mean in the original classification of MESA states
+        df_var <- df %>%  
+            mutate(rests = if_else(interval == "ACTIVE", "ACTIVE", "REST")) %>% 
+            group_by(rests) %>%
+            summarise(mean_act = mean(activity), var_act = var(activity), 
+                      .groups = "drop") 
+        
+        # Add states mean
+        df_summary <- df_ord %>% group_by(ID, state_order) %>% 
+            summarise(mean_state = round(mean(.data[["act5_mean"]]),
+                                         digits = 2), .groups = "drop") %>% 
+            pivot_wider(names_from = state_order, names_prefix = "state_mean", 
+                        values_from = mean_state) %>% 
+            mutate(
+                sleep_integral = round(sleep_amount, digits = 2),
+                stay_sleep = round(joined_trans_matrix[1, 1], digits = 3),
+                stay_awake = round(joined_trans_matrix[2, 2], digits = 3),
+                centre_point = centre,
+                amplitude = amp,
+                accuracy_acti = accur,
+                accuracy_psg = accur_psg,
+                sensitivity = sens,
+                specificity = spec,
+                nb_rest_states = length(rest_states),
+                median_limit = median(df2$act5_mean),
+                mean_active = round_func(select(filter(df_var, 
+                                                       rests == "ACTIVE"),
+                                                mean_act)),
+                mean_rest = round_func(select(filter(df_var, rests == "REST"),
+                                              mean_act)),
+                var_active = round_func(select(filter(df_var, 
+                                                      rests == "ACTIVE"),
+                                               var_act)),
+                var_rest = round_func(select(filter(df_var, rests == "REST"),
+                                             var_act)),
+                ri = round(ri2, digits = 2)
+            ) 
+
+    } else {
+        print("NO SUMMARY STATISTICS ADDED, MODEL DID NOT CONVERGE")
+    
+        # Empty dataframe if not converged
+        df_summary <- data.frame(
+            ID = unique(dt$mesaid),
+            state_mean1 = NA,
+            state_mean2 = NA,
+            state_mean3 = NA,
+            sleep_integral = NA,
+            stay_sleep = NA,
+            stay_awake = NA,
+            centre_point = NA,
+            amplitude = NA,
+            accuracy_acti = NA,
+            accuracy_psg = NA,
+            sensitivity = NA,
+            specificity = NA,
+            nb_rest_states = NA,
+            median_limit = NA,
+            mean_active = NA,
+            mean_rest = NA,
+            var_active = NA,
+            var_rest = NA,
+            ri = NA
+    )
+    }
+    return(df_summary)
+}
+```
+
+## Participants
+
+```{r}
+# Import the randomly chosen participants
+load("/home/janique/mesa/R/chosen_people.RData")
+
+# Pad participants strings
+padded_ids <- str_pad(chosen_ids, width = 4, pad = "0", side = "left")
+
+# Empty summary dataframe
+summary_df <- data.frame(matrix(ncol = 20, nrow = 0))
+
+# Setting column names
+col_names <- c("ID", "state_mean1", "state_mean2", "state_mean3",
+               "sleep_integral", "stay_sleep", "stay_awake", "centre_point",
+               "amplitude", "accuracy_acti", "accuracy_psg", "sensitivity",
+               "specificity", "nb_rest_states", "median_limit", "mean_active",
+               "mean_rest", "var_active", "var_rest", "ri")
+colnames(summary_df) <- col_names
+
+# Fit model for each individual
+for (pad_id in padded_ids) {
+    print(paste("Processing participants", pad_id))
+    file_name <- paste0("mesa-sleep-", pad_id, ".csv")
+    summary_df[nrow(summary_df) + 1,] <- fit_model(file_name)
+}
+
+# If model hasn't converged try one more time
+for (i in seq_along(summary_df$nb_rest_states)) {
+    if (is.na(summary_df$nb_rest_states[i])) {
+        summary_df[i, ] <- fit_model(paste0("mesa-sleep-", summary_df$ID[i],
+                                            ".csv"))
+    }
+}
+# 
+# save(summary_df, file = "/home/janique/mesa/R/summary_df20_sens.RData")
+# load("/home/janique/mesa/R/summary_df20_sens.RData")
+```
+
+## Combine with MESA statistics
+
+```{r out.width="100%"}
+# Personal characteristics dataset
+person <- read_csv("/home/janique/mesa/datasets/mesa-sleep-dataset-0.4.0.csv")
+
+# Subset statistics for persons included
+rel_person <- person %>%
+    select(mesaid, sleepage5c, gender1, trbleslpng5, wakeup5,
+           overallqual5, avg24hrsleep5, avginbedduration5, bcksleep5,
+           avgrestmidpoint5, overall5, epslpscl5c, sleepy5, hoostmeq5c) %>%
+    mutate(
+        # sleep in hours
+        daily_sleep_mesa = signif(avg24hrsleep5 / 60, digits = 2),
+        # rest in hours
+        in_bed_mesa = round(avginbedduration5 / 60, digits = 2),
+        .keep = "unused"
+        ) %>%
+    filter(mesaid %in% chosen_ids) %>%
+    full_join(summary_df, by = c("mesaid" = "ID")) %>%
+    mutate(
+        # Compute the difference in rest midpoint between MESA and HMM
+        add_hour = str_detect(seconds_to_period(centre_point), "H"),
+        centre_diff1 = round((as.numeric(hms(avgrestmidpoint5)) -
+                                  centre_point)/3600, digits = 2),
+        centre_diff = if_else(centre_diff1 > 12, 24 - centre_diff1, 
+                              centre_diff1),
+        centre_sleep = seconds_to_period(centre_point),
+        centre_date1 = if_else(add_hour, paste("1960-01-01",
+                                               as.character(centre_sleep)),
+                               paste("1960-01-01 0H",
+                                     as.character(centre_sleep))),
+        centre_date = ymd_hms(centre_date1),
+        # Formatted gender
+        gender = if_else(gender1 == 0, "Female", "Male")
+        ) %>% select(-centre_diff1, -centre_date1, -add_hour)
+```
+
+## Summary plots
+
+### High quality actigraphy and all actigraphy comparison.
+
+```{r}
+print("Statistics from 2-state HMM paper")
+person %>% filter(overall5 %in% c(6, 7), overallqual5 == 7) %>%
+    summarise(trouble_sleep = mean(trbleslpng5, na.rm = TRUE),
+              wakeup = mean(wakeup5, na.rm = TRUE),
+              age = mean(sleepage5c, na.rm = TRUE),
+              sleepy = mean(sleepy5, na.rm = TRUE),
+              back_sleep = mean(bcksleep5, na.rm = TRUE))
+
+print("Statistics for all MESA participants")
+# Averages for the whole dataset
+person %>%
+    summarise(trouble_sleep = mean(trbleslpng5, na.rm = TRUE),
+              wakeup = mean(wakeup5, na.rm = TRUE),
+              age = mean(sleepage5c, na.rm = TRUE),
+              sleepy = mean(sleepy5, na.rm = TRUE),
+              back_sleep = mean(bcksleep5, na.rm = TRUE))
+
+print("Statistics for my chosen patients")
+# Averages for my subjects
+rel_person %>%
+    summarise(trouble_sleep = mean(trbleslpng5, na.rm = TRUE),
+              wakeup = mean(wakeup5, na.rm = TRUE),
+              age = mean(sleepage5c, na.rm = TRUE),
+              sleepy = mean(sleepy5, na.rm = TRUE),
+              back_sleep = mean(bcksleep5, na.rm = TRUE))
+
+```
+
+### Number of participants and accuracy
+
+```{r}
+print(paste("Mean accuracy for my HMM vs PSG:",
+            round(mean(rel_person$accuracy_psg, na.rm = TRUE), digits = 2)))
+
+print(paste(nrow(rel_person), "participants were analysed."))
+
+ggplot(rel_person) +
+    geom_point(aes(x = accuracy_psg, y = accuracy_acti)) +
+    geom_abline(slope = 1, intercept = 0) +
+    ggtitle("HMM classification is more similar to actigraphy intervals than PSG")
+```
+
+### Length of rest
+
+```{r}
+# Mesa sleep values vs sleep calculated from integral
+rel_person %>% select(daily_sleep_mesa, sleep_integral, in_bed_mesa) %>%
+    pivot_longer(!sleep_integral, names_to = "type",
+                 values_to = "sleep_hours") %>%
+    ggplot(aes(x = sleep_hours, y = sleep_integral)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0) +
+    geom_smooth(method = "lm", se = FALSE) +
+    facet_wrap(vars(type), scales = "free") +
+    labs(title = "HMM overestimates sleep",
+         x = "MESA rest time", y = "Derived rest time")
+
+ggplot(rel_person) +
+    geom_histogram(aes(x = median_limit), bins = 10) +
+    labs(x = "Median", title = "Distribution of border between rest and active")
+```
+
+### Age
+
+```{r}
+ggplot(rel_person) +
+    geom_histogram(aes(x = sleepage5c), bins = 10) +
+    ggtitle("Making sure age is uniformly distributed") +
+    geom_text(aes(label = paste("mean of age:",
+                                round(mean(rel_person$sleepage5c),
+                                      digits = 1)), y = 10, x = 85))
+
+```
+
+### State Means
+
+```{r}
+rel_person %>% select(state_mean1, state_mean2, state_mean3) %>%
+    pivot_longer(cols = c(state_mean1, state_mean2, state_mean3),
+                 names_to = "state", values_to = "mean") %>%
+    ggplot() +
+    geom_boxplot(aes(x = state, y = mean)) +
+    facet_wrap(vars(state), scales = "free") +
+    theme(axis.text.x = element_blank()) +
+    ggtitle("Distribution of means for each state")
+
+rel_person %>% select(mesaid, state_mean1, state_mean2, state_mean3) %>%
+    mutate(index = row_number()) %>%
+    pivot_longer(cols = c(state_mean1, state_mean2, state_mean3),
+                 values_to = "mean", names_to = "state") %>%
+    ggplot() +
+    geom_point(aes(x = index, y = mean, col = state)) +
+    theme_classic() +
+    scale_color_manual(labels = c("1", "2", "3"),
+                       values = hue_pal()(3)) +
+    coord_flip() +
+    labs(y = "Mean", x = "Subject's Index", col = "State") +
+    theme(legend.position = c(0.9, 0.5),
+          legend.background = element_rect(size = 0.5, colour = 1))
+
+```
+
+### Correlation Plot
+
+```{r}
+rel_person %>% select(sleepage5c, gender1, trbleslpng5, wakeup5,
+                      epslpscl5c, sleepy5, sleep_integral,
+                      state_mean1, state_mean2, state_mean3,
+                      stay_sleep, stay_awake, amplitude, median_limit, ri) %>%
+    cor(use = "complete.obs") %>%
+    corrplot()
+```
+
+## Conclusions
+
+```{r}
+lbls_top <- c("ri" = "Rhythm Index", "state_mean3" = "State 3 Mean")
+
+rel_person %>% select(ri, gender, sleepage5c, state_mean3) %>% 
+    pivot_longer(cols = c("ri", "state_mean3"), names_to = "type", values_to = "values") %>% 
+    filter(!is.na(values)) %>% 
+    ggplot(aes(x = sleepage5c, y = values, col = as.factor(gender))) + 
+    geom_point() +
+    facet_wrap(vars(type), scales = "free", labeller = as_labeller(lbls_top)) +
+    labs(x = "Age") +
+    geom_quantile(quantiles = 0.5, formula = y ~ x) +
+    theme_classic() +
+    theme(axis.title.y = element_blank()) +
+    stat_cor(method = "pearson", alternative = "l") +
+    labs(col = "Gender")
+cor.test(rel_person$sleepage5c, rel_person$state_mean3,
+         alternative = "l")
+
+ggplot(rel_person) + geom_histogram(aes(x = centre_diff)) +
+    labs(title = "Centre of sleep is a good approximation for the MESA midpoint for rest", x = "Difference between centre of sleep and MESA midpoint")
+
+rel_person %>%
+    ggplot(aes(x = centre_date, y = hoostmeq5c, col = ri)) + geom_point() +
+    scale_color_gradient(low = "red", high = "green") +
+    theme_classic() +
+    labs(x = "Centre of rest", y = "Morningness-Eveningness Score",
+         col = "Rhythm Index") +
+    theme(axis.title.x = element_text(size = 14),
+          axis.title.y = element_text(size = 12),
+        axis.text.x = element_text(size = 10))
+```
+
+### Rhythm Index
+
+```{r}
+rel_person %>% select(mesaid, ri) %>% arrange(ri) %>%
+    print(n = nrow(rel_person))
+
+ggplot(rel_person, aes(x = mean_active, y = ri)) +
+    geom_point(aes(col = sleepage5c)) +
+    geom_smooth(method = "lm", se = FALSE) +
+    labs(title = "Higher active actigraphy values correspond to stable sleep",
+         x = "Mean actigraphy for active state",
+         y = "Rhythm index", col = "Age") +
+    scale_color_gradient(low = "blue", high = "red")
+cor.test(rel_person$mean_active, rel_person$ri, alternative = "g")
+```
